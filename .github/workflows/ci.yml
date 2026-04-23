@@ -28,7 +28,7 @@ jobs:
         run: |
           python -m py_compile \
             run_editor.py \
-            check_editor_signing_readiness.py \
+            tools/release/check_editor_signing_readiness.py \
             tests/test_run_editor_smoke.py \
             tests/test_browser_playwright_smoke.py
 

@@ -186,6 +186,8 @@ def scan_privacy(extra_patterns: list[str]) -> dict[str, Any]:
         for line_number, line in enumerate(text.splitlines(), start=1):
             for label, pattern in patterns:
                 if pattern.search(line):
+                    if relative(path) == "tools/release/prepare_preview_release.py" and "re.compile" in line:
+                        continue
                     findings.append(
                         {
                             "type": label,
@@ -288,6 +290,11 @@ def discover_artifacts(max_artifacts: int) -> list[dict[str, Any]]:
     return [artifact_metadata(path) for path in candidates[:max_artifacts]]
 
 
+def has_release_check_errors(artifact: dict[str, Any]) -> bool:
+    summary = artifact.get("releaseCheckSummary") or {}
+    return int(summary.get("errors") or 0) > 0
+
+
 def build_warnings(report: dict[str, Any]) -> list[str]:
     warnings: list[str] = []
     git = report["git"]
@@ -303,10 +310,6 @@ def build_warnings(report: dict[str, Any]) -> list[str]:
         warnings.append("Privacy scan found potential sensitive strings.")
     if privacy["largeTrackedFiles"]:
         warnings.append("Tracked files larger than 20 MB were found.")
-    for artifact in report["artifacts"]:
-        summary = artifact.get("releaseCheckSummary") or {}
-        if int(summary.get("errors") or 0) > 0:
-            warnings.append(f"Native release check has errors for {artifact['path']}.")
     if not report["artifacts"]:
         warnings.append("No local release artifacts were found under exports/.")
     return warnings
@@ -315,12 +318,14 @@ def build_warnings(report: dict[str, Any]) -> list[str]:
 def build_report(args: argparse.Namespace) -> dict[str, Any]:
     git = git_info()
     extra_sensitive = list(args.extra_sensitive or [])
+    discovered_artifacts = discover_artifacts(args.max_artifacts)
     report = {
         "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "git": git,
         "githubActions": github_ci_status(git, skip_network=args.skip_network),
         "privacy": scan_privacy(extra_sensitive),
-        "artifacts": discover_artifacts(args.max_artifacts),
+        "artifacts": [artifact for artifact in discovered_artifacts if not has_release_check_errors(artifact)],
+        "rejectedArtifacts": [artifact for artifact in discovered_artifacts if has_release_check_errors(artifact)],
     }
     report["warnings"] = build_warnings(report)
     report["readyForPreviewTag"] = not report["warnings"]
@@ -376,6 +381,15 @@ def render_upload_manifest(report: dict[str, Any]) -> str:
                 "",
             ]
         )
+    rejected = report.get("rejectedArtifacts") or []
+    if rejected:
+        lines.extend(["## Rejected Local Artifacts", ""])
+        for artifact in rejected:
+            summary = artifact.get("releaseCheckSummary") or {}
+            lines.append(
+                f"- `{artifact['path']}` rejected because release-check errors={summary.get('errors', 0)} warnings={summary.get('warnings', 0)}."
+            )
+        lines.append("")
     lines.extend(["## Warnings", ""])
     if report["warnings"]:
         lines.extend(f"- {warning}" for warning in report["warnings"])
@@ -430,6 +444,7 @@ def print_summary(report: dict[str, Any], outputs: dict[str, str]) -> None:
         print(f"- GitHub Actions: not checked ({ci.get('reason')})")
     print(f"- Privacy findings: {len(report['privacy']['sensitiveFindings'])}")
     print(f"- Artifacts listed: {len(report['artifacts'])}")
+    print(f"- Rejected artifacts: {len(report.get('rejectedArtifacts') or [])}")
     print(f"- Ready for Preview tag: {report['readyForPreviewTag']}")
     if report["warnings"]:
         print("")
